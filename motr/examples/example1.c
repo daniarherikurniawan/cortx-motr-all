@@ -53,6 +53,10 @@ static struct m0_idx_dix_config  motr_dix_conf;
 
 struct m0_uint128                obj_id = { 0, 0 };
 
+const static int N_BLOCK = 200;
+const static int BLOCK_SIZE = 8192;
+const static char MY_CHAR = 'C';
+
 static int object_create(struct m0_container *container)
 {
 	struct m0_obj     obj;
@@ -238,14 +242,14 @@ static int object_write(struct m0_container *container)
 	/*
 	 * alloc & prepare ext, data and attr. We will write 4k * 2.
 	 */
-	rc = alloc_vecs(&ext, &data, &attr, 2, 4096);
+	rc = alloc_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE);
 	if (rc != 0) {
 		printf("Failed to alloc ext & data & attr: %d\n", rc);
 		goto out;
 	}
-	prepare_ext_vecs(&ext, &data, &attr, 2, 4096, &last_offset, 'A');
+    prepare_ext_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE, &last_offset, MY_CHAR);
 
-	/* Start to write data to object */
+    /* Start to write data to object */
 	rc = write_data_to_object(&obj, &ext, &data, &attr);
 	cleanup_vecs(&ext, &data, &attr);
 
@@ -293,12 +297,13 @@ static void verify_show_data(struct m0_bufvec *data,
 			     char c)
 {
 	int i, j;
+    printf("  Just read %6d blocks\n", data->ov_vec.v_nr);
 
 	for (i = 0; i < data->ov_vec.v_nr; ++i) {
-		printf("Block %6d:\n", i);
-		printf("%.*s", (int)data->ov_vec.v_count[i],
-			       (char *)data->ov_buf[i]);
-		printf("\n");
+		// printf("  Block %6d:\n", i);
+		// printf("%.*s", (int)data->ov_vec.v_count[i],
+		// 	       (char *)data->ov_buf[i]);
+		// printf("\n");
 		for (j = 0; j < data->ov_vec.v_count[i]; j++)
 			if (((char*) data->ov_buf[i])[j] != c) {
 				printf("verification failed at: %d:%d\n"
@@ -308,17 +313,33 @@ static void verify_show_data(struct m0_bufvec *data,
 	}
 }
 
+static void print_throughput(int elapsed_time){
+    float rc = 0;
+    float size_kb = N_BLOCK * BLOCK_SIZE / 1000;
+    printf("data size %.2f KB (%d)\n", size_kb, N_BLOCK * BLOCK_SIZE);
+    // rc = N_BLOCK * BLOCK_SIZE * 1000 / elapsed_time ;
+    rc = size_kb * 1000000 / elapsed_time;
+    printf("Throughput = %.2lf KB/sec\n", rc);
+}
+
 static int object_read(struct m0_container *container)
 {
 	struct m0_obj      obj;
-	struct m0_client  *instance;
-	int                rc;
+    struct m0_client *instance;
+    struct timeval st, et;
+    int rc, elapsed;
 
-        struct m0_indexvec ext;
-        struct m0_bufvec   data;
-        struct m0_bufvec   attr;
+    struct m0_indexvec ext;
+    struct m0_bufvec data;
+    struct m0_bufvec attr;
 
 	uint64_t           last_offset = 0;
+
+
+    printf("Start reading data\n");
+    gettimeofday(&st, NULL);
+
+    rc = object_write(&motr_container);
 
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
@@ -334,18 +355,24 @@ static int object_read(struct m0_container *container)
 	/*
 	 * alloc & prepare ext, data and attr. We will write 4k * 2.
 	 */
-	rc = alloc_vecs(&ext, &data, &attr, 2, 4096);
-	if (rc != 0) {
+    rc = alloc_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE);
+    if (rc != 0) {
 		printf("Failed to alloc ext & data & attr: %d\n", rc);
 		goto out;
 	}
-	prepare_ext_vecs(&ext, &data, &attr, 2, 4096, &last_offset, '\0');
+    prepare_ext_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE, &last_offset, '\0');
 
-	/* Start to read data to object */
+    /* Start to read data to object */
 	rc = read_data_from_object(&obj, &ext, &data, &attr);
-	if (rc == 0) {
-		verify_show_data(&data, 'A');
-	}
+
+    gettimeofday(&et, NULL);
+    elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+    printf("Finish reading data in : %d micro seconds\n", elapsed);
+    print_throughput(elapsed);
+
+    if (rc == 0) {
+        verify_show_data(&data, MY_CHAR);
+    }
 	cleanup_vecs(&ext, &data, &attr);
 
 out:
@@ -394,9 +421,15 @@ static int object_delete(struct m0_container *container)
 
 int main(int argc, char *argv[])
 {
-	int rc;
+    struct timeval st, et;
+    int rc, elapsed;
+    printf("==================\n");
+    printf("N_BLOCK    : %d\n", N_BLOCK);
+    printf("BLOCK_SIZE : %d B\n", BLOCK_SIZE);
+    printf("TOTAL_SIZE : %d KB\n", N_BLOCK*BLOCK_SIZE/1024);
+    printf("==================\n");
 
-	if (argc != 6) {
+    if (argc != 6) {
 		printf("%s HA_ADDR LOCAL_ADDR Profile_fid Process_fid obj_id\n",
 		       argv[0]);
 		exit(-1);
@@ -436,8 +469,15 @@ int main(int argc, char *argv[])
 
 	rc = object_create(&motr_container);
 	if (rc == 0) {
-		rc = object_write(&motr_container);
-		if (rc == 0) {
+        printf("Start writing data\n");
+        gettimeofday(&st, NULL);
+        rc = object_write(&motr_container);
+        gettimeofday(&et,NULL);
+        elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+        printf("Finish writing data in : %d micro seconds\n",  elapsed);
+        print_throughput(elapsed);
+
+        if (rc == 0) {
 			rc = object_read(&motr_container);
 		}
 		object_delete(&motr_container);
