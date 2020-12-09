@@ -58,10 +58,10 @@ struct m0_client *m0_instance = NULL;
 
 pthread_barrier_t barr_read;
 pthread_barrier_t barr_delete;
-const static int N_THREAD = 10;
-const static int N_BLOCK = 1;
-const static char MY_CHAR = 'C';
+const static int N_THREAD = 5;
+const static char MY_CHAR = 'W';
 const static int LAYOUT_ID = 10,     BLOCK_SIZE =  2097152; // 2MB
+int N_BLOCK = 1;
 
     // LAYOUT_ID                  (Ideal)
     //     1,     BLOCK_SIZE =     4096; // 4KB
@@ -78,6 +78,10 @@ const static int LAYOUT_ID = 10,     BLOCK_SIZE =  2097152; // 2MB
     //    12,     BLOCK_SIZE =  8388608; // 8MB
     //    13,     BLOCK_SIZE = 16777216; // 16MB
     //    14,     BLOCK_SIZE = 33554432; // 32MB (got error [be/engine.c:312:be_engine_got_tx_open]  tx=0x7f8be8027148 engine=0x7ffcd2d93830 t_prepared=(385285,115850973) t_payload_prepared=131072 bec_tx_size_max=(262144,100663296) bec_tx_payload_max=2097152)
+
+static int update_n_block(){
+    return ((2097152/BLOCK_SIZE) > 1 )? (2097152/BLOCK_SIZE) : 1;
+}
 
 static int object_create(struct m0_container *container, struct m0_uint128 obj_id)
 {
@@ -242,7 +246,8 @@ static int object_write(struct m0_container *container, struct m0_uint128 obj_id
 {
 	struct m0_obj      obj;
 	struct m0_client  *instance;
-	int                rc;
+    struct timeval st, et;
+    int rc = 0, elapsed;
 
         struct m0_indexvec ext;
         struct m0_bufvec   data;
@@ -271,8 +276,18 @@ static int object_write(struct m0_container *container, struct m0_uint128 obj_id
 	}
     prepare_ext_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE, &last_offset, MY_CHAR);
 
+    printf("Start writing data\n");
+    gettimeofday(&st, NULL);
+    
     /* Start to write data to object */
 	rc = write_data_to_object(&obj, &ext, &data, &attr);
+
+    gettimeofday(&et, NULL);
+    elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+    printf("Finish writing data in : %d us or %.3f s  (%d - %d)\n", elapsed,
+        elapsed/1000000.0f, st.tv_sec, et.tv_sec);
+    // print_throughput(elapsed);
+
 	cleanup_vecs(&ext, &data, &attr);
 
 out:
@@ -356,9 +371,7 @@ static int object_read(struct m0_container *container, struct m0_container motr_
 
 	uint64_t           last_offset = 0;
 
-    gettimeofday(&st, NULL);
-
-    rc = object_write(&motr_container, obj_id);
+    // rc = object_write(&motr_container, obj_id);
 
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
@@ -380,14 +393,17 @@ static int object_read(struct m0_container *container, struct m0_container motr_
 		goto out;
 	}
     prepare_ext_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE, &last_offset, '\0');
+    
+    gettimeofday(&st, NULL);
 
     /* Start to read data to object */
 	rc = read_data_from_object(&obj, &ext, &data, &attr);
 
     gettimeofday(&et, NULL);
     elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
-    printf("Finish reading data in : %d micro seconds\n", elapsed);
-    print_throughput(elapsed);
+    printf("Finish reading data in : %d us or %.3f s  (%d - %d)\n", elapsed,
+            elapsed/1000000.0f, st.tv_sec, et.tv_sec);
+    // print_throughput(elapsed);
 
     if (rc == 0) {
         verify_show_data(&data, MY_CHAR);
@@ -451,16 +467,10 @@ static int start_each_client(struct m0_uint128 obj_id)
         goto out;
     }
 
-    printf("Start writing data\n");
-    gettimeofday(&st, NULL);
     rc = object_create(&motr_container, obj_id);
     if (rc == 0)
     {
         rc = object_write(&motr_container, obj_id);
-        gettimeofday(&et, NULL);
-        elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
-        printf("Finish writing data in : %d micro seconds (%d - %d)\n", elapsed, st.tv_sec, et.tv_sec);
-        print_throughput(elapsed);
 
         if (rc == 0)
         {
@@ -499,6 +509,10 @@ int main(int argc, char *argv[])
     struct m0_idx_dix_config motr_dix_conf;
     int rc = 0;
     Arg array_arg[N_THREAD];
+    
+    // Make it dynamic for benchmarking
+    N_BLOCK = update_n_block();
+
     printf("==================\n");
     printf("N_THREAD    : %d\n", N_THREAD);
     printf("N_BLOCK    : %d\n", N_BLOCK);
@@ -511,7 +525,7 @@ int main(int argc, char *argv[])
 		       argv[0]);
 		exit(-1);
 	}
-
+    
     motr_dix_conf.kc_create_meta = false;
     motr_conf.mc_is_oostore = true;
     motr_conf.mc_is_read_verify = false;
