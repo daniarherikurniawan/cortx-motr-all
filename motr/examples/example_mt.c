@@ -45,15 +45,41 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <unistd.h>
+#include <pthread.h>
 
-static struct m0_client         *m0_instance = NULL;
-static struct m0_container       motr_container;
-static struct m0_config          motr_conf;
-static struct m0_idx_dix_config  motr_dix_conf;
+typedef struct {
+    int id;
+    char *argv5;
+} Arg;
 
-struct m0_uint128                obj_id = { 0, 0 };
+struct m0_config motr_conf;
+struct m0_client *m0_instance = NULL;
 
-static int object_create(struct m0_container *container)
+pthread_barrier_t barr_read;
+pthread_barrier_t barr_delete;
+const static int N_THREAD = 10;
+const static int N_BLOCK = 1;
+const static char MY_CHAR = 'C';
+const static int LAYOUT_ID = 10,     BLOCK_SIZE =  2097152; // 2MB
+
+    // LAYOUT_ID                  (Ideal)
+    //     1,     BLOCK_SIZE =     4096; // 4KB
+    //     2,     BLOCK_SIZE =     8192; // 8KB
+    //     3,     BLOCK_SIZE =    16384; // 16KB
+    //     4,     BLOCK_SIZE =    32768; // 32KB
+    //     5,     BLOCK_SIZE =    65536; // 64KB
+    //     6,     BLOCK_SIZE =   131072; // 128KB
+    //     7,     BLOCK_SIZE =   262144; // 256KB
+    //     8,     BLOCK_SIZE =   524288; // 512KB
+    //     9,     BLOCK_SIZE =  1048576; // 1MB
+    //    10,     BLOCK_SIZE =  2097152; // 2MB
+    //    11,     BLOCK_SIZE =  4194304; // 4MB
+    //    12,     BLOCK_SIZE =  8388608; // 8MB
+    //    13,     BLOCK_SIZE = 16777216; // 16MB
+    //    14,     BLOCK_SIZE = 33554432; // 32MB (got error [be/engine.c:312:be_engine_got_tx_open]  tx=0x7f8be8027148 engine=0x7ffcd2d93830 t_prepared=(385285,115850973) t_payload_prepared=131072 bec_tx_size_max=(262144,100663296) bec_tx_payload_max=2097152)
+
+static int object_create(struct m0_container *container, struct m0_uint128 obj_id)
 {
 	struct m0_obj     obj;
 	struct m0_client *instance;
@@ -63,7 +89,7 @@ static int object_create(struct m0_container *container)
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
 	m0_obj_init(&obj, &container->co_realm, &obj_id,
-		    m0_client_layout_id(instance));
+		    LAYOUT_ID);
 
 	rc = m0_entity_create(NULL, &obj.ob_entity, &ops[0]);
 	if (rc != 0) {
@@ -84,12 +110,12 @@ static int object_create(struct m0_container *container)
 
 	m0_entity_fini(&obj.ob_entity);
 
-	printf("Object (id=%lu) creation result: %d\n",
-	       (unsigned long)obj_id.u_lo, rc);
+	// printf("Object (id=%lu) creation result: %d\n",
+	//        (unsigned long)obj_id.u_lo, rc);
 	return rc;
 }
 
-static int object_open(struct m0_obj *obj)
+static int object_open(struct m0_obj *obj, struct m0_uint128 obj_id)
 {
 	struct m0_op *ops[1] = {NULL};
 	int           rc;
@@ -112,8 +138,8 @@ static int object_open(struct m0_obj *obj)
 	ops[0] = NULL;
 
 	/* obj is valid if open succeeded */
-	printf("Object (id=%lu) open result: %d\n",
-	       (unsigned long)obj_id.u_lo, rc);
+	// printf("Object (id=%lu) open result: %d\n",
+	//        (unsigned long)obj_id.u_lo, rc);
 	return rc;
 }
 
@@ -208,11 +234,11 @@ static int write_data_to_object(struct m0_obj      *obj,
 	/* fini and release the ops */
 	m0_op_fini(ops[0]);
 	m0_op_free(ops[0]);
-	printf("Object write result: %d\n", rc);
+	// printf("Object write result: %d\n", rc);
 	return rc;
 }
 
-static int object_write(struct m0_container *container)
+static int object_write(struct m0_container *container, struct m0_uint128 obj_id)
 {
 	struct m0_obj      obj;
 	struct m0_client  *instance;
@@ -227,9 +253,9 @@ static int object_write(struct m0_container *container)
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
 	m0_obj_init(&obj, &container->co_realm, &obj_id,
-		    m0_client_layout_id(instance));
+		    LAYOUT_ID);
 
-	rc = object_open(&obj);
+	rc = object_open(&obj, obj_id);
 	if (rc != 0) {
 		printf("Failed to open object: rc=%d\n", rc);
 		return rc;
@@ -238,14 +264,14 @@ static int object_write(struct m0_container *container)
 	/*
 	 * alloc & prepare ext, data and attr. We will write 4k * 2.
 	 */
-	rc = alloc_vecs(&ext, &data, &attr, 1, 4194304);
+	rc = alloc_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE);
 	if (rc != 0) {
 		printf("Failed to alloc ext & data & attr: %d\n", rc);
 		goto out;
 	}
-	prepare_ext_vecs(&ext, &data, &attr, 1, 4194304, &last_offset, 'A');
+    prepare_ext_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE, &last_offset, MY_CHAR);
 
-	/* Start to write data to object */
+    /* Start to write data to object */
 	rc = write_data_to_object(&obj, &ext, &data, &attr);
 	cleanup_vecs(&ext, &data, &attr);
 
@@ -253,7 +279,7 @@ out:
 	/* Similar to close() */
 	m0_entity_fini(&obj.ob_entity);
 
-	printf("Object write: %d\n", rc);
+	// printf("Object write: %d\n", rc);
 	return rc;
 }
 
@@ -285,7 +311,7 @@ static int read_data_from_object(struct m0_obj      *obj,
 	/* fini and release the ops */
 	m0_op_fini(ops[0]);
 	m0_op_free(ops[0]);
-	printf("Object read result: %d\n", rc);
+	// printf("Object read result: %d\n", rc);
 	return rc;
 }
 
@@ -293,9 +319,8 @@ static void verify_show_data(struct m0_bufvec *data,
 			     char c)
 {
 	int i, j;
-
 	for (i = 0; i < data->ov_vec.v_nr; ++i) {
-		printf("Block %6d:\n", i);
+		// printf("  Block %6d:\n", i);
 		// printf("%.*s", (int)data->ov_vec.v_count[i],
 		// 	       (char *)data->ov_buf[i]);
 		// printf("\n");
@@ -306,26 +331,41 @@ static void verify_show_data(struct m0_bufvec *data,
 					i, j, c, ((char*)data->ov_buf[i])[j]);
 			}
 	}
+    // printf("Verified the correctness of %6d blocks\n", data->ov_vec.v_nr);
 }
 
-static int object_read(struct m0_container *container)
+static void print_throughput(int elapsed_time){
+    float rc = 0;
+    float size_kb = N_BLOCK * BLOCK_SIZE / 1000;
+    // printf("data size %.2f KB (%d)\n", size_kb, N_BLOCK * BLOCK_SIZE);
+    // rc = N_BLOCK * BLOCK_SIZE * 1000 / elapsed_time ;
+    rc = size_kb * 1000000 / elapsed_time;
+    printf("Throughput = %.2lf KB/sec\n", rc);
+}
+
+static int object_read(struct m0_container *container, struct m0_container motr_container, struct m0_uint128 obj_id)
 {
 	struct m0_obj      obj;
-	struct m0_client  *instance;
-	int                rc;
+    struct m0_client *instance;
+    struct timeval st, et;
+    int rc, elapsed;
 
-        struct m0_indexvec ext;
-        struct m0_bufvec   data;
-        struct m0_bufvec   attr;
+    struct m0_indexvec ext;
+    struct m0_bufvec data;
+    struct m0_bufvec attr;
 
 	uint64_t           last_offset = 0;
+
+    gettimeofday(&st, NULL);
+
+    rc = object_write(&motr_container, obj_id);
 
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
 	m0_obj_init(&obj, &container->co_realm, &obj_id,
-		    m0_client_layout_id(instance));
+		    LAYOUT_ID);
 
-	rc = object_open(&obj);
+	rc = object_open(&obj, obj_id);
 	if (rc != 0) {
 		printf("Failed to open object: rc=%d\n", rc);
 		return rc;
@@ -334,29 +374,35 @@ static int object_read(struct m0_container *container)
 	/*
 	 * alloc & prepare ext, data and attr. We will write 4k * 2.
 	 */
-	rc = alloc_vecs(&ext, &data, &attr, 1, 4194304);
-	if (rc != 0) {
+    rc = alloc_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE);
+    if (rc != 0) {
 		printf("Failed to alloc ext & data & attr: %d\n", rc);
 		goto out;
 	}
-	prepare_ext_vecs(&ext, &data, &attr, 1, 4194304, &last_offset, '\0');
+    prepare_ext_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE, &last_offset, '\0');
 
-	/* Start to read data to object */
+    /* Start to read data to object */
 	rc = read_data_from_object(&obj, &ext, &data, &attr);
-	if (rc == 0) {
-		verify_show_data(&data, 'A');
-	}
+
+    gettimeofday(&et, NULL);
+    elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+    printf("Finish reading data in : %d micro seconds\n", elapsed);
+    print_throughput(elapsed);
+
+    if (rc == 0) {
+        verify_show_data(&data, MY_CHAR);
+    }
 	cleanup_vecs(&ext, &data, &attr);
 
 out:
 	/* Similar to close() */
 	m0_entity_fini(&obj.ob_entity);
 
-	printf("Object read: %d\n", rc);
+	// printf("Object read: %d\n", rc);
 	return rc;
 }
 
-static int object_delete(struct m0_container *container)
+static int object_delete(struct m0_container *container, struct m0_uint128 obj_id)
 {
 	struct m0_obj      obj;
 	struct m0_client  *instance;
@@ -366,9 +412,9 @@ static int object_delete(struct m0_container *container)
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
 	m0_obj_init(&obj, &container->co_realm, &obj_id,
-		    m0_client_layout_id(instance));
+		    LAYOUT_ID);
 
-	rc = object_open(&obj);
+	rc = object_open(&obj, obj_id);
 	if (rc != 0) {
 		printf("Failed to open object: rc=%d\n", rc);
 		return rc;
@@ -387,67 +433,135 @@ static int object_delete(struct m0_container *container)
 	/* Similar to close() */
 	m0_entity_fini(&obj.ob_entity);
 
-	printf("Object deletion: %d\n", rc);
+	// printf("Object deletion: %d\n", rc);
 	return rc;
 }
 
+static int start_each_client(struct m0_uint128 obj_id)
+{
+    struct m0_container motr_container;
+    struct timeval st, et;
+    int rc = 0, elapsed;
+
+    m0_container_init(&motr_container, NULL, &M0_UBER_REALM, m0_instance);
+    rc = motr_container.co_realm.re_entity.en_sm.sm_rc;
+    if (rc != 0)
+    {
+        printf("error in m0_container_init: %d\n", rc);
+        goto out;
+    }
+
+    printf("Start writing data\n");
+    gettimeofday(&st, NULL);
+    rc = object_create(&motr_container, obj_id);
+    if (rc == 0)
+    {
+        rc = object_write(&motr_container, obj_id);
+        gettimeofday(&et, NULL);
+        elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+        printf("Finish writing data in : %d micro seconds (%d - %d)\n", elapsed, st.tv_sec, et.tv_sec);
+        print_throughput(elapsed);
+
+        if (rc == 0)
+        {
+            pthread_barrier_wait(&barr_read);
+            printf("[barr_read] All threads read together .. obj_id %d\n", obj_id.u_lo);
+            rc = object_read(&motr_container, motr_container, obj_id);
+        }
+        pthread_barrier_wait(&barr_delete);
+        printf("[barr_delete] All threads delete together .. obj_id %d\n", obj_id.u_lo);
+        object_delete(&motr_container, obj_id);
+    }
+
+out:
+    return rc;
+}
+
+static void* init_client_thread(void *vargp) {
+    struct m0_uint128 obj_id = {0, 0};
+    Arg *arg = (Arg *)vargp;
+
+    // Update 5th argument to create different object ids among the threads
+    obj_id.u_lo = atoll(arg->argv5)+arg->id;
+    if (obj_id.u_lo < M0_ID_APP.u_lo) {
+        printf("obj_id invalid. Please refer to M0_ID_APP "
+               "in motr/client.c\n");
+        exit(-EINVAL);
+    }
+
+    // printf("This is thread.. %d\n", arg->id);
+    start_each_client(obj_id);
+    pthread_exit(NULL);
+}
 
 int main(int argc, char *argv[])
 {
-	int rc;
+    struct m0_idx_dix_config motr_dix_conf;
+    int rc = 0;
+    Arg array_arg[N_THREAD];
+    printf("==================\n");
+    printf("N_THREAD    : %d\n", N_THREAD);
+    printf("N_BLOCK    : %d\n", N_BLOCK);
+    printf("BLOCK_SIZE : %d B\n", BLOCK_SIZE);
+    printf("TOTAL_SIZE : %d KB (%d MB)\n", N_BLOCK*BLOCK_SIZE/1024*N_THREAD,  N_BLOCK*BLOCK_SIZE/1024/1024*N_THREAD);
+    printf("==================\n");
 
-	if (argc != 6) {
+    if (argc != 6) {
 		printf("%s HA_ADDR LOCAL_ADDR Profile_fid Process_fid obj_id\n",
 		       argv[0]);
 		exit(-1);
 	}
-	obj_id.u_lo = atoll(argv[5]);
-	if (obj_id.u_lo < M0_ID_APP.u_lo) {
-		printf("obj_id invalid. Please refer to M0_ID_APP "
-		       "in motr/client.c\n");
-		exit(-EINVAL);
-	}
 
-	motr_dix_conf.kc_create_meta = false;
+    motr_dix_conf.kc_create_meta = false;
+    motr_conf.mc_is_oostore = true;
+    motr_conf.mc_is_read_verify = false;
+    motr_conf.mc_ha_addr = argv[1];
+    motr_conf.mc_local_addr = argv[2];
+    motr_conf.mc_profile = argv[3];
+    motr_conf.mc_process_fid = argv[4];
+    motr_conf.mc_tm_recv_queue_min_len = M0_NET_TM_RECV_QUEUE_DEF_LEN;
+    motr_conf.mc_max_rpc_msg_size = M0_RPC_DEF_MAX_RPC_MSG_SIZE;
+    motr_conf.mc_idx_service_id = M0_IDX_DIX;
+    motr_conf.mc_idx_service_conf = (void *)&motr_dix_conf;
 
-	motr_conf.mc_is_oostore            = true;
-	motr_conf.mc_is_read_verify        = false;
-	motr_conf.mc_ha_addr               = argv[1];
-	motr_conf.mc_local_addr            = argv[2];
-	motr_conf.mc_profile               = argv[3];
-	motr_conf.mc_process_fid           = argv[4];
-	motr_conf.mc_tm_recv_queue_min_len = M0_NET_TM_RECV_QUEUE_DEF_LEN;
-	motr_conf.mc_max_rpc_msg_size      = M0_RPC_DEF_MAX_RPC_MSG_SIZE;
-	motr_conf.mc_idx_service_id        = M0_IDX_DIX;
-	motr_conf.mc_idx_service_conf      = (void *)&motr_dix_conf;
+    rc = m0_client_init(&m0_instance, &motr_conf, true);
+    if (rc != 0)
+    {
+        printf("error in m0_client_init: %d\n", rc);
+        exit(rc);
+    }
 
-	rc = m0_client_init(&m0_instance, &motr_conf, true);
-	if (rc != 0) {
-		printf("error in m0_client_init: %d\n", rc);
-		exit(rc);
-	}
+    pthread_t t[N_THREAD];
+    pthread_barrier_init(&barr_read, NULL, N_THREAD);
+    pthread_barrier_init(&barr_delete, NULL, N_THREAD);
+    int i;
 
-	m0_container_init(&motr_container, NULL, &M0_UBER_REALM, m0_instance);
-	rc = motr_container.co_realm.re_entity.en_sm.sm_rc;
-	if (rc != 0) {
-		printf("error in m0_container_init: %d\n", rc);
-		goto out;
-	}
+    // Let us create three threads
+    for (i = 0; i < N_THREAD; i++){
+        array_arg[i].id = i+1;
+        array_arg[i].argv5 = argv[5];
+        pthread_create(&t[i], NULL, init_client_thread, &array_arg[i]);
+    }
+    for (i = 0; i < N_THREAD; i++)
+        pthread_join(t[i], NULL);
+    pthread_barrier_destroy(&barr_read);
+    pthread_barrier_destroy(&barr_delete);
 
-	rc = object_create(&motr_container);
-	if (rc == 0) {
-		rc = object_write(&motr_container);
-		if (rc == 0) {
-			rc = object_read(&motr_container);
-		}
-		object_delete(&motr_container);
-	}
-
-out:
-	m0_client_fini(m0_instance, true);
-	printf("app completed: %d\n", rc);
-	return rc;
+    m0_client_fini(m0_instance, true);
+    printf("app completed: %d\n", rc);
 }
+
+/*
+ And there are multiple "m0_instance" in this program (in multiple threads).
+This is not allowed. Only a single instance is allowed in a process space address.
+Please share this instance in all threads.
+You can refer to source code: motr/st/utils/copy_mt.c
+You will find how to do multi-threaded Motr client app.
+
+Please do this in another file: e.g. example_mt.c
+And write some guide for how to program a multi-threaded Motr application.
+And then create a new PR.
+*/
 
 /*
  *  Local variables:
