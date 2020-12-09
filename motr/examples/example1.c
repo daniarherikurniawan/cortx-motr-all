@@ -52,17 +52,17 @@
 
 typedef struct {
     int id;
-    char *argv1;
-    char *argv2;
-    char *argv3;
-    char *argv4;
     char *argv5;
 } Arg;
 
-pthread_barrier_t barr;
+pthread_barrier_t barr_read;
+pthread_barrier_t barr_delete;
 const static int N_BLOCK = 4;
 const static int BLOCK_SIZE = 16384; // in Bytes
 const static char MY_CHAR = 'C';
+
+struct m0_config motr_conf;
+struct m0_client *m0_instance = NULL;
 
     //    [ 1] =     4096,
     //    [ 2] =     8192,
@@ -440,24 +440,11 @@ static int object_delete(struct m0_container *container, struct m0_uint128 obj_i
 	return rc;
 }
 
-static int start_each_client(
-    struct m0_config motr_conf,
-    struct m0_idx_dix_config motr_dix_conf,
-    struct m0_uint128 obj_id)
+static int start_each_client(struct m0_uint128 obj_id)
 {
-    struct m0_client *m0_instance = NULL;
     struct m0_container motr_container;
-
-    // m0_instance = NULL;
     struct timeval st, et;
     int rc = 0, elapsed;
-    rc = m0_client_init(&m0_instance, &motr_conf, true);
-    if (rc != 0)
-    {
-        printf("error in m0_client_init: %d\n", rc);
-        exit(rc);
-    }
-    printf("==================\n");
 
     m0_container_init(&motr_container, NULL, &M0_UBER_REALM, m0_instance);
     rc = motr_container.co_realm.re_entity.en_sm.sm_rc;
@@ -480,30 +467,22 @@ static int start_each_client(
 
         if (rc == 0)
         {
+            pthread_barrier_wait(&barr_read);
+            printf("[barr_read] All threads read together .. obj_id %d\n", obj_id.u_lo);
             rc = object_read(&motr_container, motr_container, obj_id);
         }
-        sleep(9);
+        pthread_barrier_wait(&barr_delete);
+        printf("[barr_delete] All threads delete together .. obj_id %d\n", obj_id.u_lo);
         object_delete(&motr_container, obj_id);
     }
 
 out:
-    m0_client_fini(m0_instance, true);
-    printf("app completed: %d\n", rc);
     return rc;
 }
 
 static void* init_client_thread(void *vargp) {
     struct m0_uint128 obj_id = {0, 0};
-    struct m0_config motr_conf;
-    struct m0_idx_dix_config motr_dix_conf;
     Arg *arg = (Arg *)vargp;
-    char *local_address;
-
-    // update the local_address to differentiate each thread contact point
-    local_address = strdup(arg->argv2);
-    local_address[strlen(arg->argv2) - 1] = '\0';
-    sprintf(local_address, "%s%d", local_address, arg->id);
-    printf("This is thread.. %d  %s\n", arg->id, local_address);
 
     // Update 5th argument to create different object ids among the threads
     obj_id.u_lo = atoll(arg->argv5)+arg->id;
@@ -513,27 +492,15 @@ static void* init_client_thread(void *vargp) {
         exit(-EINVAL);
     }
 
-    motr_dix_conf.kc_create_meta = false;
-    motr_conf.mc_is_oostore = true;
-    motr_conf.mc_is_read_verify = false;
-    motr_conf.mc_ha_addr = arg->argv1;
-    motr_conf.mc_local_addr = local_address;
-    motr_conf.mc_profile = arg->argv3;
-    motr_conf.mc_process_fid = arg->argv4;
-    motr_conf.mc_tm_recv_queue_min_len = M0_NET_TM_RECV_QUEUE_DEF_LEN;
-    motr_conf.mc_max_rpc_msg_size = M0_RPC_DEF_MAX_RPC_MSG_SIZE;
-    motr_conf.mc_idx_service_id = M0_IDX_DIX;
-    motr_conf.mc_idx_service_conf = (void *)&motr_dix_conf;
-
-    // pthread_barrier_wait(&barr);
-    printf("This is thread.. %d  %s\n", arg->id, local_address);
-    start_each_client(motr_conf, motr_dix_conf, obj_id);
+    printf("This is thread.. %d\n", arg->id);
+    start_each_client(obj_id);
     pthread_exit(NULL);
 }
 
 int main(int argc, char *argv[])
 {
-    int N_THREAD = 2;
+    struct m0_idx_dix_config motr_dix_conf;
+    int rc = 0, N_THREAD = 10;
     Arg array_arg[N_THREAD];
     printf("==================\n");
     printf("N_BLOCK    : %d\n", N_BLOCK);
@@ -547,24 +514,57 @@ int main(int argc, char *argv[])
 		exit(-1);
 	}
 
+    motr_dix_conf.kc_create_meta = false;
+    motr_conf.mc_is_oostore = true;
+    motr_conf.mc_is_read_verify = false;
+    motr_conf.mc_ha_addr = argv[1];
+    motr_conf.mc_local_addr = argv[2];
+    motr_conf.mc_profile = argv[3];
+    motr_conf.mc_process_fid = argv[4];
+    motr_conf.mc_tm_recv_queue_min_len = M0_NET_TM_RECV_QUEUE_DEF_LEN;
+    motr_conf.mc_max_rpc_msg_size = M0_RPC_DEF_MAX_RPC_MSG_SIZE;
+    motr_conf.mc_idx_service_id = M0_IDX_DIX;
+    motr_conf.mc_idx_service_conf = (void *)&motr_dix_conf;
+
+    rc = m0_client_init(&m0_instance, &motr_conf, true);
+    if (rc != 0)
+    {
+        printf("error in m0_client_init: %d\n", rc);
+        exit(rc);
+    }
+
     pthread_t t[N_THREAD];
-    pthread_barrier_init(&barr, NULL, N_THREAD);
+    pthread_barrier_init(&barr_read, NULL, N_THREAD);
+    pthread_barrier_init(&barr_delete, NULL, N_THREAD);
     int i;
+    printf("==================\n");
 
     // Let us create three threads
     for (i = 0; i < N_THREAD; i++){
         array_arg[i].id = i+1;
-        array_arg[i].argv1 = argv[1];
-        array_arg[i].argv2 = argv[2];
-        array_arg[i].argv3 = argv[3];
-        array_arg[i].argv4 = argv[4];
         array_arg[i].argv5 = argv[5];
         pthread_create(&t[i], NULL, init_client_thread, &array_arg[i]);
     }
     for (i = 0; i < N_THREAD; i++)
         pthread_join(t[i], NULL);
-    pthread_barrier_destroy(&barr);
+    pthread_barrier_destroy(&barr_read);
+    pthread_barrier_destroy(&barr_delete);
+
+    m0_client_fini(m0_instance, true);
+    printf("app completed: %d\n", rc);
 }
+
+/*
+ And there are multiple "m0_instance" in this program (in multiple threads).
+This is not allowed. Only a single instance is allowed in a process space address.
+Please share this instance in all threads.
+You can refer to source code: motr/st/utils/copy_mt.c
+You will find how to do multi-threaded Motr client app.
+
+Please do this in another file: e.g. example_mt.c
+And write some guide for how to program a multi-threaded Motr application.
+And then create a new PR.
+*/
 
 /*
  *  Local variables:
