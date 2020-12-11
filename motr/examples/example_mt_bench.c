@@ -53,6 +53,8 @@
 typedef struct {
     int id;
     char *argv5;
+    /* latency in ms */
+    float latency;
 } Arg;
 
 struct m0_config motr_conf;
@@ -62,43 +64,45 @@ pthread_barrier_t barr_read;
 pthread_barrier_t barr_write;
 pthread_barrier_t barr_delete;
 
-// These values will be dynamically updated during initialization
-char MY_CHAR_1 = 'W';
-char MY_CHAR_2 = 'W';
-char MY_CHAR_3 = 'W';
-// updated by update_n_block()
+/* updated by update_n_block() */
 int N_BLOCK = 1;
 
-// 0 == false ; 1 == true
-int ENABLE_WRITE = 1;
-int ENABLE_READ = 0; // erase Page Cache: free -h; sync; echo 1 > /proc/sys/vm/drop_caches; free -h
+/* 0 == false ; 1 == true ; provided by argv[6], argv[7], argv[8] */
+const static int ENABLE_LATENCY_LOG = 0; 
+int ENABLE_WRITE = 0;
+int ENABLE_READ = 0; /* erase Page Cache: free -h; sync; echo 1 > /proc/sys/vm/drop_caches; free -h */
 int ENABLE_DELETE = 0;
 sem_t n_thread_semaphore;
-// Parallelishm: number of thd allowed in a sema space
-const static int N_THD_SEMA = 70;
-// 1 Thread == 1 Request == has N_BLOCK (each block has BLOCK_SIZE KB)
-const static int N_THREAD = 3000;
-const static int ENABLE_LATENCY_LOG = 0; 
-const static int LAYOUT_ID = 6,     BLOCK_SIZE =   131072; // 128KB
-
-    // LAYOUT_ID               (Ideal size)
-    //     1,     BLOCK_SIZE =     4096; // 4KB
-    //     2,     BLOCK_SIZE =     8192; // 8KB
-    //     3,     BLOCK_SIZE =    16384; // 16KB
-    //     4,     BLOCK_SIZE =    32768; // 32KB
-    //     5,     BLOCK_SIZE =    65536; // 64KB
-    //     6,     BLOCK_SIZE =   131072; // 128KB
-    //     7,     BLOCK_SIZE =   262144; // 256KB
-    //     8,     BLOCK_SIZE =   524288; // 512KB
-    //     9,     BLOCK_SIZE =  1048576; // 1MB
-    //    10,     BLOCK_SIZE =  2097152; // 2MB
-    //    11,     BLOCK_SIZE =  4194304; // 4MB
-    //    12,     BLOCK_SIZE =  8388608; // 8MB
-    //    13,     BLOCK_SIZE = 16777216; // 16MB
-    //    14,     BLOCK_SIZE = 33554432; // 32MB (got error [be/engine.c:312:be_engine_got_tx_open]  tx=0x7f8be8027148 engine=0x7ffcd2d93830 t_prepared=(385285,115850973) t_payload_prepared=131072 bec_tx_size_max=(262144,100663296) bec_tx_payload_max=2097152)
+/* Parallelishm: number of thd allowed in a sema space */
+const static int N_THD_SEMA = 75;
+/* 1 Thread == 1 Request == has N_BLOCK (each block has BLOCK_SIZE KB) */
+const static int N_THREAD = 6;
+/* provided by argv[9], argv[10] */
+int LAYOUT_ID =   10,     BLOCK_SIZE =  2097152; // 2MB
+/*
+ *  LAYOUT_ID               (Ideal size)
+ *      1,     BLOCK_SIZE =     4096; // 4KB
+ *      2,     BLOCK_SIZE =     8192; // 8KB
+ *      3,     BLOCK_SIZE =    16384; // 16KB
+ *      4,     BLOCK_SIZE =    32768; // 32KB
+ *      5,     BLOCK_SIZE =    65536; // 64KB
+ *      6,     BLOCK_SIZE =   131072; // 128KB
+ *      7,     BLOCK_SIZE =   262144; // 256KB
+ *      8,     BLOCK_SIZE =   524288; // 512KB
+ *      9,     BLOCK_SIZE =  1048576; // 1MB
+ *     10,     BLOCK_SIZE =  2097152; // 2MB
+ *     11,     BLOCK_SIZE =  4194304; // 4MB
+ *     12,     BLOCK_SIZE =  8388608; // 8MB
+ *     13,     BLOCK_SIZE = 16777216; // 16MB
+ *     14,     BLOCK_SIZE = 33554432; // 32MB (got error [be/engine.c:312:be_engine_got_tx_open]  tx=0x7f8be8027148 engine=0x7ffcd2d93830 t_prepared=(385285,115850973) t_payload_prepared=131072 bec_tx_size_max=(262144,100663296) bec_tx_payload_max=2097152)
+ */
 
 static int update_n_block(){
-    return ((2097152/BLOCK_SIZE) > 1 )? (2097152/BLOCK_SIZE) : 1;
+    // return ((1048576/BLOCK_SIZE) > 1 )? (1048576/BLOCK_SIZE) : 1;
+    if (BLOCK_SIZE > 524288)
+        return 1;
+    else
+        return 8;
 }
 
 static int object_create(struct m0_container *container, struct m0_uint128 obj_id)
@@ -209,8 +213,9 @@ static void prepare_ext_vecs(struct m0_indexvec *ext,
 {
 	int      i;
 
-    // The data are composed from 3 different randomized char, this to minimize 
-    // cache hit.
+    /* The data are composed from 3 different randomized char, this to minimize 
+     * cache hit.
+     */
 
 	for (i = 0; i < block_count/3; ++i) {
 		ext->iv_index[i]       = *last_index;
@@ -288,7 +293,7 @@ static int write_data_to_object(struct m0_obj      *obj,
 	return rc;
 }
 
-static int object_write(struct m0_container *container, struct m0_uint128 obj_id)
+static int object_write(struct m0_container *container, Arg *arg, struct m0_uint128 obj_id)
 {
 	struct m0_obj      obj;
 	struct m0_client  *instance;
@@ -300,6 +305,11 @@ static int object_write(struct m0_container *container, struct m0_uint128 obj_id
         struct m0_bufvec   attr;
 
 	uint64_t           last_offset = 0;
+
+    /* These values will be dynamically to minimize cache hit */
+    char MY_CHAR_1 = 'W';
+    char MY_CHAR_2 = 'W';
+    char MY_CHAR_3 = 'W';
 
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
@@ -320,24 +330,30 @@ static int object_write(struct m0_container *container, struct m0_uint128 obj_id
 		printf("Failed to alloc ext & data & attr: %d\n", rc);
 		goto out;
 	}
+
+    srand((unsigned)time(NULL));
+    MY_CHAR_1 = '/' + (rand() % 74);
+    MY_CHAR_2 = '/' + (rand() % 74);
+    MY_CHAR_3 = '/' + (rand() % 74);
+
     prepare_ext_vecs(&ext, &data, &attr, N_BLOCK, BLOCK_SIZE, &last_offset, 
         MY_CHAR_1, MY_CHAR_2, MY_CHAR_3);
 
     // pthread_barrier_wait(&barr_write);
-    if (ENABLE_LATENCY_LOG > 0) {
-        printf("Thread write .. obj_id %d\n", obj_id.u_lo);
-        gettimeofday(&st, NULL);
-    }
+    gettimeofday(&st, NULL);
+    if (ENABLE_LATENCY_LOG > 0)
+        printf("Thread_%d write .. obj_id %d\n", arg->id, obj_id.u_lo);
     
     /* Start to write data to object */
 	rc = write_data_to_object(&obj, &ext, &data, &attr);
+    
+    gettimeofday(&et, NULL);
+    elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+    arg->latency = elapsed/1000.0f;
 
-    if (ENABLE_LATENCY_LOG > 0) {
-        gettimeofday(&et, NULL);
-        elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+    if (ENABLE_LATENCY_LOG > 0)
         printf("Finish writing data in : %d us or %.3f s  (%d - %d)\n", elapsed,
             elapsed/1000000.0f, st.tv_sec, et.tv_sec);
-    }
     // print_throughput(elapsed);
 
 	cleanup_vecs(&ext, &data, &attr);
@@ -410,7 +426,8 @@ static void print_throughput(int elapsed_time){
     printf("Throughput = %.2lf KB/sec\n", rc);
 }
 
-static int object_read(struct m0_container *container, struct m0_container motr_container, struct m0_uint128 obj_id)
+static int object_read(struct m0_container *container, 
+    Arg *arg, struct m0_uint128 obj_id)
 {
 	struct m0_obj      obj;
     struct m0_client *instance;
@@ -427,10 +444,9 @@ static int object_read(struct m0_container *container, struct m0_container motr_
     // rc = object_write(&motr_container, obj_id);
     
     // pthread_barrier_wait(&barr_read); 
-    if (ENABLE_LATENCY_LOG > 0) {
-        printf("Thread read .. obj_id %d\n", obj_id.u_lo);
-        gettimeofday(&st, NULL);
-    }
+    gettimeofday(&st, NULL);
+    if (ENABLE_LATENCY_LOG > 0)
+        printf("Thread_%d read .. obj_id %d\n", arg->id, obj_id.u_lo);
 
 	M0_SET0(&obj);
 	instance = container->co_realm.re_instance;
@@ -456,13 +472,14 @@ static int object_read(struct m0_container *container, struct m0_container motr_
 
     /* Start to read data to object */
 	rc = read_data_from_object(&obj, &ext, &data, &attr);
-
-    if (ENABLE_LATENCY_LOG > 0) {
-        gettimeofday(&et, NULL);
-        elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+    
+    gettimeofday(&et, NULL);
+    elapsed = ((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec);
+    arg->latency = elapsed/1000.0f;
+    
+    if (ENABLE_LATENCY_LOG > 0)
         printf("Finish reading data in : %d us or %.3f s  (%d - %d)\n", elapsed,
                 elapsed/1000000.0f, st.tv_sec, et.tv_sec);
-    }
     // print_throughput(elapsed);
 
     // if (rc == 0) {
@@ -513,11 +530,11 @@ static int object_delete(struct m0_container *container, struct m0_uint128 obj_i
 	return rc;
 }
 
-static int start_each_client(struct m0_uint128 obj_id)
+static int start_each_thread(struct m0_uint128 obj_id, Arg *arg)
 {
     struct m0_container motr_container;
     struct timeval st, et;
-    int rc = 0, elapsed;
+    int rc = 0, elapsed = 0;
     sem_wait(&n_thread_semaphore);
 
     m0_container_init(&motr_container, NULL, &M0_UBER_REALM, m0_instance);
@@ -534,30 +551,30 @@ static int start_each_client(struct m0_uint128 obj_id)
     if (rc == 0)
     {   
         if (ENABLE_WRITE > 0) {
-            rc = object_write(&motr_container, obj_id);
+            rc = object_write(&motr_container, arg, obj_id);
         }
         if (ENABLE_READ > 0 && rc == 0)
         {
-            rc = object_read(&motr_container, motr_container, obj_id);
+            rc = object_read(&motr_container, arg, obj_id);
         }
         if ( ENABLE_DELETE > 0) {
             // pthread_barrier_wait(&barr_delete);
             if (ENABLE_LATENCY_LOG > 0)
-                printf("Thread delete .. obj_id %d\n", obj_id.u_lo);
+                printf("Thread_%d delete .. obj_id %d\n", arg->id, obj_id.u_lo);
             object_delete(&motr_container, obj_id);
         }
     }
     sem_post(&n_thread_semaphore);
 
 out:
-    return rc;
+    return elapsed;
 }
 
 static void* init_client_thread(void *vargp) {
     struct m0_uint128 obj_id = {0, 0};
     Arg *arg = (Arg *)vargp;
 
-    // Update 5th argument to create different object ids among the threads
+    /* Update 5th argument to create different object ids among the threads */
     obj_id.u_lo = atoll(arg->argv5)+arg->id;
     if (obj_id.u_lo < M0_ID_APP.u_lo) {
         printf("obj_id invalid. Please refer to M0_ID_APP "
@@ -566,7 +583,8 @@ static void* init_client_thread(void *vargp) {
     }
 
     // printf("This is thread.. %d\n", arg->id);
-    start_each_client(obj_id);
+    start_each_thread(obj_id, arg);
+
     pthread_exit(NULL);
 }
 
@@ -575,10 +593,9 @@ static void print_setup(){
     printf("Write/Read/Delete\n  %d  /  %d /   %d\n", ENABLE_WRITE, ENABLE_READ, ENABLE_DELETE);
     printf("N_THREAD   : %d\n", N_THREAD);
     printf("N_THD_SEMA : %d\n", N_THD_SEMA);
-    printf("MY_CHAR    : %d\n", MY_CHAR_1, MY_CHAR_2, MY_CHAR_3);
     printf("N_BLOCK    : %d\n", N_BLOCK);
     printf("BLOCK_SIZE : %d KB\n", BLOCK_SIZE/1024);
-    printf("TOTAL_SIZE : %d KB (%d MB)\n", N_BLOCK*BLOCK_SIZE/1024*N_THREAD,  N_BLOCK*BLOCK_SIZE/1024/1024*N_THREAD);
+    printf("TOTAL_SIZE : %d KB (%.2f MB)\n", N_BLOCK*BLOCK_SIZE/1024*N_THREAD,  N_BLOCK*BLOCK_SIZE/1024/1024.0f*N_THREAD);
     printf("==================\n");
 }
 
@@ -586,20 +603,24 @@ int main(int argc, char *argv[])
 {
     struct m0_idx_dix_config motr_dix_conf;
     int rc = 0;
+    double sum_latency = 0;
     Arg array_arg[N_THREAD];
     sem_init(&n_thread_semaphore, 0, N_THD_SEMA);
- 
-    // Make it dynamic for benchmarking
-    N_BLOCK = update_n_block();
-    srand((unsigned)time(NULL));
-    MY_CHAR_1 = '/' + (rand() % 74);
-    MY_CHAR_2 = '/' + (rand() % 74);
-    MY_CHAR_3 = '/' + (rand() % 74);
+    
+    /* Initiate the IO mode */
+    ENABLE_WRITE = atoi(argv[6]);
+    ENABLE_READ = atoi(argv[7]);
+    ENABLE_DELETE = atoi(argv[8]);
+    // Specify the Layout and block size
+    // LAYOUT_ID = atoi(argv[9]); 
+    // BLOCK_SIZE = atoi(argv[10]); 
 
+    /* Make it dynamic for benchmarking */
+    N_BLOCK = update_n_block();
     print_setup();
 
-    if (argc != 6) {
-		printf("%s HA_ADDR LOCAL_ADDR Profile_fid Process_fid obj_id\n",
+    if (argc != (6 + 3 )) {
+		printf("Need more arguments: %s HA_ADDR LOCAL_ADDR Profile_fid Process_fid obj_id\n",
 		       argv[0]);
 		exit(-1);
 	}
@@ -633,6 +654,7 @@ int main(int argc, char *argv[])
     for (i = 0; i < N_THREAD; i++){
         array_arg[i].id = i+1;
         array_arg[i].argv5 = argv[5];
+        array_arg[i].latency = 0;
         pthread_create(&t[i], NULL, init_client_thread, &array_arg[i]);
     }
     for (i = 0; i < N_THREAD; i++)
@@ -643,6 +665,12 @@ int main(int argc, char *argv[])
     pthread_barrier_destroy(&barr_delete);
     sem_destroy(&n_thread_semaphore);
     m0_client_fini(m0_instance, true);
+
+    /* Get the average latency */
+    for (i = 0; i < N_THREAD; i++)
+        sum_latency += array_arg[i].latency;
+
+    printf("Avg latency = %.2f/%d = %.2f ms\n",sum_latency,N_THREAD, sum_latency/N_THREAD);
 
     print_setup();
     printf("app completed: %d\n", rc);
