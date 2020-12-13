@@ -109,6 +109,7 @@ static int update_n_block(){
         return ((4194304/BLOCK_SIZE) > 1 )? (4194304/BLOCK_SIZE) : 1;
     else 
         exit -1;
+    
 }
 
 static int object_create(struct m0_container *container, struct m0_uint128 obj_id)
