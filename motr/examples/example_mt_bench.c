@@ -68,17 +68,20 @@ pthread_barrier_t barr_delete;
 int N_BLOCK = 1;
 
 /* 0 == false ; 1 == true ; provided by argv[6], argv[7], argv[8] */
+int progress_mod = 20;
+int PAYLOAD_PER_REQ = 2; // in MB
 const static int ENABLE_LATENCY_LOG = 0; 
 int ENABLE_WRITE = 0;
 int ENABLE_READ = 0; /* erase Page Cache: free -h; sync; echo 1 > /proc/sys/vm/drop_caches; free -h */
 int ENABLE_DELETE = 0;
 sem_t n_thread_semaphore;
 /* Parallelishm: number of thd allowed in a sema space */
-const static int N_THD_SEMA = 75;
+int N_THD_SEMA = 0;
 /* 1 Thread == 1 Request == has N_BLOCK (each block has BLOCK_SIZE KB) */
-const static int N_THREAD = 6;
+const static int N_THREAD = 500;
+
 /* provided by argv[9], argv[10] */
-int LAYOUT_ID =   10,     BLOCK_SIZE =  2097152; // 2MB
+int LAYOUT_ID =  6,     BLOCK_SIZE =   131072; // 128KB
 /*
  *  LAYOUT_ID               (Ideal size)
  *      1,     BLOCK_SIZE =     4096; // 4KB
@@ -98,11 +101,14 @@ int LAYOUT_ID =   10,     BLOCK_SIZE =  2097152; // 2MB
  */
 
 static int update_n_block(){
-    // return ((1048576/BLOCK_SIZE) > 1 )? (1048576/BLOCK_SIZE) : 1;
-    if (BLOCK_SIZE > 524288)
-        return 1;
-    else
-        return 8;
+    if (PAYLOAD_PER_REQ == 1)
+        return ((1048576/BLOCK_SIZE) > 1 )? (1048576/BLOCK_SIZE) : 1;
+    else if (PAYLOAD_PER_REQ == 2)
+        return ((2097152/BLOCK_SIZE) > 1 )? (2097152/BLOCK_SIZE) : 1;
+    else if (PAYLOAD_PER_REQ == 4)
+        return ((4194304/BLOCK_SIZE) > 1 )? (4194304/BLOCK_SIZE) : 1;
+    else 
+        exit -1;
 }
 
 static int object_create(struct m0_container *container, struct m0_uint128 obj_id)
@@ -362,7 +368,11 @@ out:
 	/* Similar to close() */
 	m0_entity_fini(&obj.ob_entity);
 
-	// printf("Object write: %d\n", rc);
+    if (arg->id % progress_mod == 0){
+	    printf("+");
+        fflush(stdout);
+    }
+
 	return rc;
 }
 
@@ -491,6 +501,11 @@ out:
 	/* Similar to close() */
 	m0_entity_fini(&obj.ob_entity);
 
+    if (arg->id % progress_mod == 0){
+	    printf("+");
+        fflush(stdout);
+    }
+
 	// printf("Object read: %d\n", rc);
 	return rc;
 }
@@ -589,37 +604,45 @@ static void* init_client_thread(void *vargp) {
 }
 
 static void print_setup(){
-    printf("==================\n");
+    printf("====================\n");
     printf("Write/Read/Delete\n  %d  /  %d /   %d\n", ENABLE_WRITE, ENABLE_READ, ENABLE_DELETE);
     printf("N_THREAD   : %d\n", N_THREAD);
     printf("N_THD_SEMA : %d\n", N_THD_SEMA);
     printf("N_BLOCK    : %d\n", N_BLOCK);
     printf("BLOCK_SIZE : %d KB\n", BLOCK_SIZE/1024);
     printf("TOTAL_SIZE : %d KB (%.2f MB)\n", N_BLOCK*BLOCK_SIZE/1024*N_THREAD,  N_BLOCK*BLOCK_SIZE/1024/1024.0f*N_THREAD);
-    printf("==================\n");
+    printf("====================\n");
 }
 
 int main(int argc, char *argv[])
 {
     struct m0_idx_dix_config motr_dix_conf;
+    struct timeval st, et;
     int rc = 0;
-    double sum_latency = 0;
+    double sum_latency = 0, elapsed = 0, total_payload = 0;
     Arg array_arg[N_THREAD];
-    sem_init(&n_thread_semaphore, 0, N_THD_SEMA);
-    
+
     /* Initiate the IO mode */
     ENABLE_WRITE = atoi(argv[6]);
     ENABLE_READ = atoi(argv[7]);
     ENABLE_DELETE = atoi(argv[8]);
     // Specify the Layout and block size
-    // LAYOUT_ID = atoi(argv[9]); 
-    // BLOCK_SIZE = atoi(argv[10]); 
+    N_THD_SEMA = atoi(argv[9]); 
+    LAYOUT_ID = atoi(argv[10]); 
+    BLOCK_SIZE = atoi(argv[11]); 
+    PAYLOAD_PER_REQ = atoi(argv[12]);
+
+    sem_init(&n_thread_semaphore, 0, N_THD_SEMA);
+
+    /* To print out progress every 5 % */
+    if (N_THREAD > 20)
+        progress_mod = N_THREAD/20;
 
     /* Make it dynamic for benchmarking */
     N_BLOCK = update_n_block();
     print_setup();
 
-    if (argc != (6 + 3 )) {
+    if (argc < (6 + 3 )) {
 		printf("Need more arguments: %s HA_ADDR LOCAL_ADDR Profile_fid Process_fid obj_id\n",
 		       argv[0]);
 		exit(-1);
@@ -650,6 +673,7 @@ int main(int argc, char *argv[])
     pthread_barrier_init(&barr_delete, NULL, N_THREAD);
     int i;
 
+    gettimeofday(&st, NULL);
     // Let us create three threads
     for (i = 0; i < N_THREAD; i++){
         array_arg[i].id = i+1;
@@ -660,6 +684,8 @@ int main(int argc, char *argv[])
     for (i = 0; i < N_THREAD; i++)
         pthread_join(t[i], NULL);
     
+    gettimeofday(&et, NULL);
+
     pthread_barrier_destroy(&barr_read);
     pthread_barrier_destroy(&barr_write);
     pthread_barrier_destroy(&barr_delete);
@@ -670,9 +696,15 @@ int main(int argc, char *argv[])
     for (i = 0; i < N_THREAD; i++)
         sum_latency += array_arg[i].latency;
 
-    printf("Avg latency = %.2f/%d = %.2f ms\n",sum_latency,N_THREAD, sum_latency/N_THREAD);
+    printf("\nAvg latency = %.2f/%d = %.2f ms = %.3f secs/req\n",
+        sum_latency,N_THREAD, sum_latency/N_THREAD, sum_latency/N_THREAD/1000.0f);
 
-    print_setup();
+    /* Calculate throughput in MBps */
+    total_payload = N_BLOCK*BLOCK_SIZE/1024/1024.0f*N_THREAD;
+    elapsed = (((et.tv_sec - st.tv_sec) * 1000000) + (et.tv_usec - st.tv_usec))/1000000.0f - 3;
+    printf("Throughput = %.2f/%.2f = %.2f MBps\n",total_payload,elapsed, total_payload/elapsed);
+
+    // print_setup();
     printf("app completed: %d\n", rc);
 }
 
