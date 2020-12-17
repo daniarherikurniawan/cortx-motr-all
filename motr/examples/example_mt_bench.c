@@ -69,16 +69,15 @@ int N_BLOCK = 1;
 
 /* 0 == false ; 1 == true ; provided by argv[6], argv[7], argv[8] */
 int progress_mod = 20;
-int PAYLOAD_PER_REQ = 2; // in MB
 const static int ENABLE_LATENCY_LOG = 0; 
 int ENABLE_WRITE = 0;
 int ENABLE_READ = 0; /* erase Page Cache: free -h; sync; echo 1 > /proc/sys/vm/drop_caches; free -h */
 int ENABLE_DELETE = 0;
 sem_t n_thread_semaphore;
 /* Parallelishm: number of thd allowed in a sema space */
-int N_THD_SEMA = 0;
+int N_THD_SEMA = 4;
 /* 1 Thread == 1 Request == has N_BLOCK (each block has BLOCK_SIZE KB) */
-const static int N_THREAD = 500;
+const static int N_THREAD = 1000;
 
 /* provided by argv[9], argv[10] */
 int LAYOUT_ID =  6,     BLOCK_SIZE =   131072; // 128KB
@@ -101,15 +100,40 @@ int LAYOUT_ID =  6,     BLOCK_SIZE =   131072; // 128KB
  */
 
 static int update_n_block(){
-    if (PAYLOAD_PER_REQ == 1)
-        return ((1048576/BLOCK_SIZE) > 1 )? (1048576/BLOCK_SIZE) : 1;
-    else if (PAYLOAD_PER_REQ == 2)
-        return ((2097152/BLOCK_SIZE) > 1 )? (2097152/BLOCK_SIZE) : 1;
-    else if (PAYLOAD_PER_REQ == 4)
-        return ((4194304/BLOCK_SIZE) > 1 )? (4194304/BLOCK_SIZE) : 1;
+    /* payload per request = block_size */
+    return 1;
+}
+
+/* return ideal block size */
+static int get_block_size(int layout_id){
+    if (layout_id == 1)
+        return 4096;
+    else if (layout_id == 2)
+        return 8192;
+    else if (layout_id == 3)
+        return 16384;
+    else if (layout_id == 4)
+        return 32768;
+    else if (layout_id == 5)
+        return 65536; // 64KB
+    else if (layout_id == 6)
+        return 131072; // 128KB
+    else if (layout_id == 7)
+        return 262144; // 256KB
+    else if (layout_id == 8)
+        return 524288; // 512KB
+    else if (layout_id == 9)
+        return 1048576; // 1MB
+    else if (layout_id == 10)
+        return 2097152; // 2MB
+    else if (layout_id == 11)
+        return 4194304; // 4MB
+    else if (layout_id == 12)
+        return 8388608; // 8MB
+    else if (layout_id == 13)
+        return 16777216; // 16MB
     else 
-        exit -1;
-    
+        printf("ERROR: Layout id (%d) is too big!\n", layout_id);
 }
 
 static int object_create(struct m0_container *container, struct m0_uint128 obj_id)
@@ -628,11 +652,9 @@ int main(int argc, char *argv[])
     ENABLE_READ = atoi(argv[7]);
     ENABLE_DELETE = atoi(argv[8]);
     // Specify the Layout and block size
-    N_THD_SEMA = atoi(argv[9]); 
-    LAYOUT_ID = atoi(argv[10]); 
-    BLOCK_SIZE = atoi(argv[11]); 
-    PAYLOAD_PER_REQ = atoi(argv[12]);
-
+    LAYOUT_ID = atoi(argv[9]); 
+    N_THD_SEMA = atoi(argv[10]);
+     
     sem_init(&n_thread_semaphore, 0, N_THD_SEMA);
 
     /* To print out progress every 5 % */
@@ -640,6 +662,7 @@ int main(int argc, char *argv[])
         progress_mod = N_THREAD/20;
 
     /* Make it dynamic for benchmarking */
+    BLOCK_SIZE = get_block_size(LAYOUT_ID); 
     N_BLOCK = update_n_block();
     print_setup();
 
