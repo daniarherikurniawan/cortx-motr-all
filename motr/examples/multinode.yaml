@@ -1,0 +1,46 @@
+nodes:
+  - hostname: dan-cortx-1.local      
+    data_iface: eth0     
+    data_iface_type: tcp   
+                            
+    m0_servers:
+      - runs_confd: true
+        io_disks:
+          data: []
+      - io_disks:
+          data:
+            - /dev/sda1
+    m0_clients:
+        s3: 0          
+        other: 2        
+  - hostname: dan-cortx-2.local
+    data_iface: eth0
+    data_iface_type: tcp
+    m0_servers:
+      - runs_confd: true
+        io_disks:
+          data: []
+      - io_disks:
+          data:
+            - /dev/sda1
+    m0_clients:
+        s3: 0
+        other: 2
+  - hostname: dan-cortx-3.local
+    data_iface: eth0
+    data_iface_type: tcp
+    m0_servers:
+      - runs_confd: true
+        io_disks:
+          data: []
+      - io_disks:
+          data:
+            - /dev/sda1
+    m0_clients:
+        s3: 0
+        other: 2
+pools:
+  - name: the pool
+    data_units: 3
+    parity_units: 0
+
