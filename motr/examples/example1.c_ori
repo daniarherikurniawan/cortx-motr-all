@@ -238,12 +238,12 @@ static int object_write(struct m0_container *container)
 	/*
 	 * alloc & prepare ext, data and attr. We will write 4k * 2.
 	 */
-	rc = alloc_vecs(&ext, &data, &attr, 1, 4194304);
+	rc = alloc_vecs(&ext, &data, &attr, 2, 4096);
 	if (rc != 0) {
 		printf("Failed to alloc ext & data & attr: %d\n", rc);
 		goto out;
 	}
-	prepare_ext_vecs(&ext, &data, &attr, 1, 4194304, &last_offset, 'A');
+	prepare_ext_vecs(&ext, &data, &attr, 2, 4096, &last_offset, 'A');
 
 	/* Start to write data to object */
 	rc = write_data_to_object(&obj, &ext, &data, &attr);
@@ -296,9 +296,9 @@ static void verify_show_data(struct m0_bufvec *data,
 
 	for (i = 0; i < data->ov_vec.v_nr; ++i) {
 		printf("Block %6d:\n", i);
-		// printf("%.*s", (int)data->ov_vec.v_count[i],
-		// 	       (char *)data->ov_buf[i]);
-		// printf("\n");
+		printf("%.*s", (int)data->ov_vec.v_count[i],
+			       (char *)data->ov_buf[i]);
+		printf("\n");
 		for (j = 0; j < data->ov_vec.v_count[i]; j++)
 			if (((char*) data->ov_buf[i])[j] != c) {
 				printf("verification failed at: %d:%d\n"
@@ -334,12 +334,12 @@ static int object_read(struct m0_container *container)
 	/*
 	 * alloc & prepare ext, data and attr. We will write 4k * 2.
 	 */
-	rc = alloc_vecs(&ext, &data, &attr, 1, 4194304);
+	rc = alloc_vecs(&ext, &data, &attr, 2, 4096);
 	if (rc != 0) {
 		printf("Failed to alloc ext & data & attr: %d\n", rc);
 		goto out;
 	}
-	prepare_ext_vecs(&ext, &data, &attr, 1, 4194304, &last_offset, '\0');
+	prepare_ext_vecs(&ext, &data, &attr, 2, 4096, &last_offset, '\0');
 
 	/* Start to read data to object */
 	rc = read_data_from_object(&obj, &ext, &data, &attr);
